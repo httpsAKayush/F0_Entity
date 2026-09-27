@@ -1,0 +1,188 @@
+# =============================================================================
+# Business Entity Resolution — Default Configuration
+# All tunable parameters live here. Override via CLI --config or environment
+# variables (env vars take precedence, then this file, then code defaults).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Paths (override via env vars BER_DATA_DIR, BER_OUTPUT_DIR, BER_MODEL_DIR)
+# ---------------------------------------------------------------------------
+paths:
+  data_dir: "data"                    # root containing train/ and test/ subdirs
+  output_dir: "output"
+  model_dir: "models"
+  train_subdir: "train"
+  test_subdir: "test"
+
+  # Expected filenames inside data_dir/train_subdir/ and data_dir/test_subdir/
+  source1_file: "source1.tsv"
+  source2_file: "source2.tsv"
+  source3_file: "source3.tsv"
+  ground_truth_file: "ground_truth.tsv"  # training only
+
+  # Output files written by predict
+  candidate_pairs_file: "candidate_pairs.tsv"
+  matching_results_file: "matching_results.tsv"
+  model_artifact_file: "model.pkl"
+  config_artifact_file: "tuned_config.yaml"
+
+# ---------------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------------
+random_seed: 42
+
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
+io:
+  chunk_size: 100000          # rows per chunk when streaming large source files
+  source_encoding: "utf-8"
+  delimiter: "\t"
+
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+normalization:
+  # Max tokens kept in a normalized name for blocking key construction
+  name_max_tokens: 8
+  # Prefix/suffix lengths (in chars) used by name_prefix and name_suffix blockers
+  name_prefix_len: 5
+  name_suffix_len: 5
+  # Address prefix length for address_prefix blocker
+  address_prefix_len: 6
+
+# ---------------------------------------------------------------------------
+# Blocking
+# ---------------------------------------------------------------------------
+blocking:
+  # Which strategies to activate (order doesn't matter; engine unions all outputs)
+  # Remove "dense_embedding_nn" for fast-iteration mode, or set use_dense_embedding: false
+  active_strategies:
+    - name_prefix
+    - name_suffix
+    - address_number
+    - address_prefix
+    - rare_numeric_token
+    - tfidf_nn
+
+  # Set to true to include the dense embedding blocking channel (slow but higher recall)
+  use_dense_embedding: false
+
+  # Maximum candidates per (source1_entity_id, source_id) after all strategies combined
+  candidate_cap: 30
+
+  # Maximum block size before it is skipped / truncated (prevents runaway blocks from
+  # degenerate normalization keys that match hundreds of thousands of records)
+  max_block_size: 500
+
+  # Minimum normalized blocking key length; shorter keys → empty/degenerate, skip them
+  min_key_length: 2
+
+  name_prefix:
+    prefix_len: 5          # chars; must match normalization.name_prefix_len or override here
+
+  name_suffix:
+    suffix_len: 5
+
+  address_number:
+    # Uses the numeric tokens in the normalized address as blocking key
+    min_token_len: 1
+
+  address_prefix:
+    prefix_len: 6
+
+  rare_numeric_token:
+    # Only use numeric tokens that appear in <= this many source1 records
+    # (common numbers like "100" are useless blocking keys)
+    max_frequency: 50
+
+  tfidf_nn:
+    top_k: 20              # retrieve top-k TF-IDF nearest neighbours per query record
+    min_similarity: 0.10   # pairs below this cosine similarity are discarded
+    max_features: 200000   # TF-IDF vocabulary cap
+    ngram_range: [1, 2]    # character n-grams: (1,2)
+    analyzer: "char_wb"    # 'char_wb' pads tokens at word boundaries
+
+  dense_embedding_nn:
+    top_k: 20
+    min_similarity: 0.60
+    model_name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    batch_size: 512
+
+# ---------------------------------------------------------------------------
+# Features
+# ---------------------------------------------------------------------------
+features:
+  # Threshold below which name edit-distance similarity is treated as "very low"
+  name_edit_low_threshold: 0.5
+  address_edit_low_threshold: 0.4
+
+# ---------------------------------------------------------------------------
+# Training split
+# ---------------------------------------------------------------------------
+training:
+  # Fraction of SOURCE-1 ENTITIES (not pairs) held out for validation
+  validation_fraction: 0.15
+  # Ratio of negative to positive candidate pairs in training data
+  negative_positive_ratio: 5
+  # Only sample hard negatives (blocking-generated non-GT pairs), not random pairs
+  hard_negatives_only: true
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+models:
+  lightgbm:
+    n_estimators: 500
+    learning_rate: 0.05
+    num_leaves: 63
+    max_depth: -1
+    min_child_samples: 20
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+    n_jobs: -1
+    random_state: 42
+    verbose: -1
+
+  xgboost:
+    n_estimators: 400
+    learning_rate: 0.05
+    max_depth: 6
+    min_child_weight: 5
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    n_jobs: -1
+    random_state: 42
+    verbosity: 0
+    eval_metric: "logloss"
+
+  ensemble:
+    # Weights for [lightgbm, xgboost] — must sum to 1.0 or will be normalized
+    weights: [0.6, 0.4]
+
+  # Which model(s) to use: "lightgbm", "xgboost", or "ensemble"
+  active_model: "ensemble"
+
+# ---------------------------------------------------------------------------
+# Decision threshold tuning
+# ---------------------------------------------------------------------------
+decision:
+  # Grid of thresholds to try during grid search
+  threshold_grid: [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7]
+  # Default threshold if validation set is too small to tune
+  default_threshold: 0.5
+  # Whether to tune per-country thresholds (requires enough val data per country)
+  per_country: false
+  # Minimum number of Source-1 entities in a country's val partition to tune it separately
+  min_country_val_size: 100
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  level: "INFO"
+  format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"

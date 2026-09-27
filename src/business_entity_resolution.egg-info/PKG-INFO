@@ -1,0 +1,27 @@
+Metadata-Version: 2.4
+Name: business-entity-resolution
+Version: 1.0.0
+Summary: Production-grade business entity resolution pipeline for the Amazon ML Challenge 2026
+Author: Entity Resolution Team
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: lightgbm>=4.5.0
+Requires-Dist: xgboost>=2.1.0
+Requires-Dist: polars>=1.9.0
+Requires-Dist: pandas>=2.2.0
+Requires-Dist: scikit-learn>=1.5.0
+Requires-Dist: scipy>=1.14.0
+Requires-Dist: numpy>=2.1.0
+Requires-Dist: rapidfuzz>=3.10.0
+Requires-Dist: unidecode>=1.3.8
+Requires-Dist: anyascii>=0.3.2
+Requires-Dist: pyyaml>=6.0.2
+Requires-Dist: pydantic>=2.9.0
+Requires-Dist: click>=8.1.7
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3.0; extra == "dev"
+Requires-Dist: pytest-cov>=5.0.0; extra == "dev"
+Requires-Dist: mypy>=1.11.0; extra == "dev"
+Requires-Dist: ruff>=0.7.0; extra == "dev"
+Requires-Dist: types-PyYAML>=6.0.12; extra == "dev"
