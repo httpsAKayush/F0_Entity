@@ -20,3 +20,10 @@ dist/
 build/
 .venv/
 venv/
+
+dataset/test/*.tsv
+dataset/train/*.tsv
+.env
+
+
+
