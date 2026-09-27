@@ -250,11 +250,27 @@ def _apply_dataclass(dc_type: type, data: dict[str, Any]) -> Any:
     """
     Recursively construct a dataclass from a (possibly nested) dict,
     ignoring unknown keys to stay forward-compatible with YAML additions.
+
+    ``from __future__ import annotations`` turns all field annotations into
+    strings at module load time, so we MUST resolve them at call time via
+    ``typing.get_type_hints()``; otherwise ``dataclasses.is_dataclass(fld.type)``
+    always receives a ``str`` and never fires.
     """
     import dataclasses
+    import typing
 
     if not dataclasses.is_dataclass(dc_type):
         return data
+
+    # Resolve forward-reference strings → actual type objects.
+    # Provide the module's globals so that locally defined dataclass names resolve.
+    try:
+        import sys
+        module = sys.modules.get(dc_type.__module__, None)
+        globalns = vars(module) if module is not None else {}
+        resolved_hints = typing.get_type_hints(dc_type, globalns=globalns)
+    except Exception:
+        resolved_hints = {}
 
     fields = {f.name: f for f in dataclasses.fields(dc_type)}
     kwargs: dict[str, Any] = {}
@@ -263,16 +279,12 @@ def _apply_dataclass(dc_type: type, data: dict[str, Any]) -> Any:
         if name not in data:
             continue
         value = data[name]
-        # Resolve the actual type (strip Optional / list wrappers for dataclasses)
-        ftype = fld.type
-        # If the field type is itself a dataclass, recurse
+        # Use the resolved type object, fall back to the raw (string) annotation.
+        ftype = resolved_hints.get(name, fld.type)
         try:
-            origin = getattr(ftype, "__origin__", None)
             if isinstance(value, dict) and dataclasses.is_dataclass(ftype):
                 kwargs[name] = _apply_dataclass(ftype, value)
-            elif isinstance(value, list) and name in (
-                "ngram_range",
-            ):
+            elif isinstance(value, list) and name in ("ngram_range",):
                 kwargs[name] = tuple(value)
             else:
                 kwargs[name] = value

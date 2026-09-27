@@ -13,11 +13,13 @@ Column name decisions (documented here per spec requirements):
   We use a long/tidy format (one row per match) rather than a wide format with
   comma-separated ids in a single cell, because it is easier to join and group
   without string parsing at the critical path.
-- Output file matching_results.tsv columns:
-    source1_entity_id, source2_match_ids, source3_match_ids
-  where match-id columns hold comma-separated strings (or empty string for none).
-- Output file candidate_pairs.tsv columns:
-    source1_entity_id, candidate_entity_id, source_tag, score
+- Output file matching_results.tsv columns (official ML Challenge 2026 format):
+    source1_entity_id, matched_entity_ids
+  where matched_entity_ids holds a comma-separated string of all S2- and S3-
+  matched IDs combined, or an empty string for singletons.
+- Output file candidate_pairs.tsv columns (official ML Challenge 2026 format):
+    source1_entity_id, candidate_entity_ids
+  where candidate_entity_ids holds a comma-separated string of all candidate IDs.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ class ColumnSpec:
     """Specification for a single column: name and whether nulls are forbidden."""
     name: str
     required: bool = True   # if True, column must have zero nulls
+    unique: bool = False    # if True, column must have no duplicate values
 
 
 @dataclass(frozen=True)
@@ -98,18 +101,19 @@ GROUND_TRUTH_SCHEMA = SchemaSpec(
 MATCHING_RESULTS_SCHEMA = SchemaSpec(
     file_label="matching_results",
     columns=(
-        ColumnSpec("source1_entity_id", required=True),
-        ColumnSpec("source2_match_ids", required=False),
-        ColumnSpec("source3_match_ids", required=False),
+        # Official ML Challenge 2026 format: one row per S1 entity, all S2+S3
+        # matches combined into a single comma-separated column.
+        ColumnSpec("source1_entity_id", required=True, unique=True),
+        ColumnSpec("matched_entity_ids", required=False),
     ),
 )
 
 CANDIDATE_PAIRS_SCHEMA = SchemaSpec(
     file_label="candidate_pairs",
     columns=(
-        ColumnSpec("source1_entity_id", required=True),
-        ColumnSpec("candidate_entity_id", required=True),
-        ColumnSpec("source_tag", required=True),
-        ColumnSpec("score", required=True),
+        # Official ML Challenge 2026 format: one row per S1 entity, all S2+S3
+        # candidates combined into a single comma-separated column.
+        ColumnSpec("source1_entity_id", required=True, unique=True),
+        ColumnSpec("candidate_entity_ids", required=False),
     ),
 )

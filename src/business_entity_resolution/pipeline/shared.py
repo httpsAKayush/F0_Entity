@@ -472,12 +472,18 @@ def prepare_training_data(
     gt_filtered = ground_truth_df[ground_truth_df["source_tag"] == source_tag]
     gt_set = set(zip(gt_filtered["source1_entity_id"], gt_filtered["source_id"]))
 
-    # Label candidates
+    # Label candidates via vectorized isin: construct a single string key per pair,
+    # build the GT key set in the same format, then check membership in one pass.
+    # This avoids a Python function call per row (apply axis=1 overhead).
+    # Separator "|||" cannot appear in entity IDs (which use alphanumeric S1-/S2-/S3- format).
     candidates = candidates.copy()
-    candidates["is_match"] = candidates.apply(
-        lambda row: 1 if (row["source1_entity_id"], row["other_entity_id"]) in gt_set else 0,
-        axis=1,
+    _SEP = "|||"
+    pair_keys = candidates["source1_entity_id"] + _SEP + candidates["other_entity_id"]
+    gt_keys = frozenset(
+        s1id + _SEP + sid
+        for s1id, sid in gt_set
     )
+    candidates["is_match"] = pair_keys.isin(gt_keys).astype(int)
 
     positives = candidates[candidates["is_match"] == 1]
     negatives = candidates[candidates["is_match"] == 0]

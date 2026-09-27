@@ -54,11 +54,24 @@ def _make_predictions(
         source1_entity_id → set of predicted matched ids.
     """
     predictions: dict[str, set[str]] = {eid: set() for eid in source1_ids}
+
+    if scored_pairs.empty:
+        return predictions
+
+    # Vectorized filter: boolean mask is O(n), not O(n) per row
     matches = scored_pairs[scored_pairs["score"] >= threshold]
-    for _, row in matches.iterrows():
-        s1id = row["source1_entity_id"]
+    if matches.empty:
+        return predictions
+
+    # Groupby is pandas-native; avoid Python-level row iteration entirely
+    grouped = (
+        matches[["source1_entity_id", "other_entity_id"]]
+        .groupby("source1_entity_id")["other_entity_id"]
+        .apply(set)
+    )
+    for s1id, id_set in grouped.items():
         if s1id in predictions:
-            predictions[s1id].add(row["other_entity_id"])
+            predictions[s1id] = id_set
     return predictions
 
 

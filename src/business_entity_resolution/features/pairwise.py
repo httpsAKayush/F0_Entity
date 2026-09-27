@@ -43,7 +43,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz as rfuzz
-from rapidfuzz import process as rprocess
+# rapidfuzz.process is not used directly here (cdist is called via rfuzz, not rprocess)
 
 logger = logging.getLogger(__name__)
 
@@ -190,33 +190,30 @@ class FeatureExtractor:
         if candidates.empty:
             return np.zeros((0, len(FEATURE_NAMES)), dtype=np.float32)
 
-        # Build lookup dicts for fast access
+        # Build indexed lookups for O(1) vectorized column access
         s1_lookup = source1_df.set_index("entity_id")
         ot_lookup = other_df.set_index("entity_id")
 
         s1_ids = candidates["source1_entity_id"].values
         ot_ids = candidates["other_entity_id"].values
 
-        # Gather aligned series from lookups
-        def _get(lookup: pd.DataFrame, ids: np.ndarray, col: str) -> list[str]:
-            return [str(lookup.at[i, col]) if i in lookup.index else "" for i in ids]
+        # Vectorized column gathering: reindex aligns by index label in one C-level pass.
+        # Missing entity IDs get NaN which fillna("") converts to empty string.
+        def _vec_get(lookup: pd.DataFrame, ids: np.ndarray, col: str) -> list[str]:
+            return lookup[col].reindex(ids).fillna("").tolist()
 
-        s1_names = _get(s1_lookup, s1_ids, "norm_name")
-        ot_names = _get(ot_lookup, ot_ids, "norm_name")
-        s1_addrs = _get(s1_lookup, s1_ids, "norm_address")
-        ot_addrs = _get(ot_lookup, ot_ids, "norm_address")
-        s1_nums = _get(s1_lookup, s1_ids, "street_number")
-        ot_nums = _get(ot_lookup, ot_ids, "street_number")
-        s1_countries = _get(s1_lookup, s1_ids, "country_norm")
-        ot_countries = _get(ot_lookup, ot_ids, "country_norm")
-        s1_landmarks = [
-            float(s1_lookup.at[i, "is_landmark"]) if i in s1_lookup.index else 0.0
-            for i in s1_ids
-        ]
-        ot_landmarks = [
-            float(ot_lookup.at[i, "is_landmark"]) if i in ot_lookup.index else 0.0
-            for i in ot_ids
-        ]
+        s1_names = _vec_get(s1_lookup, s1_ids, "norm_name")
+        ot_names = _vec_get(ot_lookup, ot_ids, "norm_name")
+        s1_addrs = _vec_get(s1_lookup, s1_ids, "norm_address")
+        ot_addrs = _vec_get(ot_lookup, ot_ids, "norm_address")
+        s1_nums = _vec_get(s1_lookup, s1_ids, "street_number")
+        ot_nums = _vec_get(ot_lookup, ot_ids, "street_number")
+        s1_countries = _vec_get(s1_lookup, s1_ids, "country_norm")
+        ot_countries = _vec_get(ot_lookup, ot_ids, "country_norm")
+
+        # Landmark flags: reindex + fillna(0.0) → numpy array directly
+        s1_landmarks = s1_lookup["is_landmark"].reindex(s1_ids).fillna(0.0).to_numpy(dtype=np.float32)
+        ot_landmarks = ot_lookup["is_landmark"].reindex(ot_ids).fillna(0.0).to_numpy(dtype=np.float32)
 
         n = len(s1_ids)
         features = np.zeros((n, len(FEATURE_NAMES)), dtype=np.float32)
@@ -269,14 +266,14 @@ class FeatureExtractor:
             len_ratio(a, b) for a, b in zip(s1_addrs, ot_addrs)
         ], dtype=np.float32)
 
-        # ---- Landmark flags ----
-        features[:, 14] = np.array(s1_landmarks, dtype=np.float32)
-        features[:, 15] = np.array(ot_landmarks, dtype=np.float32)
+        # ---- Landmark flags (already float32 numpy arrays from reindex) ----
+        features[:, 14] = s1_landmarks
+        features[:, 15] = ot_landmarks
 
-        # ---- Country agreement ----
-        features[:, 16] = np.array([
-            1.0 if a == b else 0.0 for a, b in zip(s1_countries, ot_countries)
-        ], dtype=np.float32)
+        # ---- Country agreement (vectorized string comparison) ----
+        s1_c_arr = np.array(s1_countries)
+        ot_c_arr = np.array(ot_countries)
+        features[:, 16] = (s1_c_arr == ot_c_arr).astype(np.float32)
 
         # ---- Missing-field indicators ----
         features[:, 17] = np.array([

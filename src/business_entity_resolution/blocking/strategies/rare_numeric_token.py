@@ -51,43 +51,63 @@ class RareNumericTokenBlocking(BlockingStrategy):
         source1_df: pd.DataFrame,
         other_df: pd.DataFrame,
     ) -> pd.DataFrame:
-        # Build frequency table from Source-1
-        s1_tokens: dict[str, list[str]] = {}  # entity_id -> list[numeric tokens]
-        token_freq: Counter[str] = Counter()
+        min_len = self._min_key_length
 
-        for _, row in source1_df[["entity_id", "norm_name", "norm_address"]].iterrows():
-            combined = f"{row['norm_name']} {row['norm_address']}"
-            tokens = set(_extract_numeric_tokens(combined))
-            tokens = {t for t in tokens if len(t) >= self._min_key_length}
-            s1_tokens[row["entity_id"]] = list(tokens)
-            token_freq.update(tokens)
+        # ── Source-1: vectorized token extraction ──────────────────────────
+        # Concatenate norm_name and norm_address into a single text column,
+        # then explode all numeric tokens into one row each — no iterrows.
+        s1_text = (
+            source1_df["norm_name"].fillna("") + " " + source1_df["norm_address"].fillna("")
+        )
+        s1_tokens_ser = s1_text.apply(
+            lambda t: list({tok for tok in _extract_numeric_tokens(t) if len(tok) >= min_len})
+        )
 
-        # Identify rare tokens
+        # Build token → entity_id mapping and frequency counter
+        s1_exploded = (
+            source1_df[["entity_id"]]
+            .assign(token=s1_tokens_ser)
+            .explode("token")
+            .dropna(subset=["token"])
+        )
+        s1_exploded = s1_exploded[s1_exploded["token"] != ""]
+
+        if s1_exploded.empty:
+            return self._empty_candidates()
+
+        token_freq: Counter = Counter(s1_exploded["token"])
+
+        # Keep only rare tokens
         rare_tokens = {t for t, freq in token_freq.items() if freq <= self._max_frequency}
-
         if not rare_tokens:
             return self._empty_candidates()
 
-        # Index other_df by numeric tokens
-        ot_index: dict[str, list[str]] = {}  # token -> list[entity_id]
-        for _, row in other_df[["entity_id", "norm_name", "norm_address"]].iterrows():
-            combined = f"{row['norm_name']} {row['norm_address']}"
-            tokens = set(_extract_numeric_tokens(combined))
-            tokens &= rare_tokens  # only use tokens rare in Source-1
-            for tok in tokens:
-                ot_index.setdefault(tok, []).append(row["entity_id"])
+        s1_rare = s1_exploded[s1_exploded["token"].isin(rare_tokens)]
 
-        # Generate pairs
-        pairs: list[tuple[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for s1_id, tokens in s1_tokens.items():
-            for tok in tokens:
-                if tok not in rare_tokens:
-                    continue
-                for ot_id in ot_index.get(tok, []):
-                    pair = (s1_id, ot_id)
-                    if pair not in seen:
-                        seen.add(pair)
-                        pairs.append(pair)
+        # ── Other source: vectorized token extraction ──────────────────────
+        ot_text = (
+            other_df["norm_name"].fillna("") + " " + other_df["norm_address"].fillna("")
+        )
+        ot_tokens_ser = ot_text.apply(
+            lambda t: list({tok for tok in _extract_numeric_tokens(t) if len(tok) >= min_len and tok in rare_tokens})
+        )
+        ot_exploded = (
+            other_df[["entity_id"]]
+            .assign(token=ot_tokens_ser)
+            .explode("token")
+            .dropna(subset=["token"])
+        )
+        ot_exploded = ot_exploded[ot_exploded["token"] != ""]
 
+        if ot_exploded.empty:
+            return self._empty_candidates()
+
+        # ── Generate pairs via merge on token ─────────────────────────────
+        # A pandas merge replaces the nested Python loop entirely.
+        merged = s1_rare.merge(
+            ot_exploded.rename(columns={"entity_id": "other_entity_id"}),
+            on="token",
+        )[["entity_id", "other_entity_id"]].drop_duplicates()
+
+        pairs = list(zip(merged["entity_id"], merged["other_entity_id"]))
         return self._make_candidates(pairs, self.name)

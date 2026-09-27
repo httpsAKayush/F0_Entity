@@ -88,17 +88,38 @@ class Aggregator:
     ) -> dict[str, list[str]]:
         """
         Apply per-entity thresholds, returning source1_id -> list of matched IDs.
+
+        When ``per_country_thresholds`` is active, thresholds differ per entity so
+        we vectorize as much as possible: compute the threshold per-row via a
+        vectorized map, then apply a single boolean mask.
         """
         matched: dict[str, list[str]] = {}
         if scored_pairs.empty:
             return matched
-        for _, row in scored_pairs.iterrows():
-            s1id = row["source1_entity_id"]
-            score = float(row["score"])
-            thresh = self._get_threshold(s1id)
-            if score >= thresh:
-                matched.setdefault(s1id, []).append(row["other_entity_id"])
-        return matched
+
+        if not self._per_country:
+            # Fast path: single global threshold — pure vectorized
+            above = scored_pairs[scored_pairs["score"] >= self._threshold]
+        else:
+            # Per-entity threshold: map entity_id -> country -> threshold
+            # .map() is O(n) and pandas-native
+            country_series = scored_pairs["source1_entity_id"].map(
+                lambda eid: self._country_map.get(eid, "")
+            )
+            threshold_series = country_series.map(
+                lambda c: self._per_country.get(c, self._per_country.get("_default", self._threshold))
+            )
+            above = scored_pairs[scored_pairs["score"] >= threshold_series]
+
+        if above.empty:
+            return matched
+
+        grouped = (
+            above[["source1_entity_id", "other_entity_id"]]
+            .groupby("source1_entity_id")["other_entity_id"]
+            .apply(list)
+        )
+        return grouped.to_dict()
 
     def aggregate(
         self,
@@ -189,11 +210,11 @@ class Aggregator:
         self, scored_pairs: pd.DataFrame
     ) -> dict[str, list[str]]:
         """Return all candidates (regardless of threshold) per source1 entity."""
-        result: dict[str, list[str]] = {}
         if scored_pairs.empty or "other_entity_id" not in scored_pairs.columns:
-            return result
-        for _, row in scored_pairs.iterrows():
-            result.setdefault(row["source1_entity_id"], []).append(
-                row["other_entity_id"]
-            )
-        return result
+            return {}
+        grouped = (
+            scored_pairs[["source1_entity_id", "other_entity_id"]]
+            .groupby("source1_entity_id")["other_entity_id"]
+            .apply(list)
+        )
+        return grouped.to_dict()

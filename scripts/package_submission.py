@@ -11,6 +11,7 @@ Validation is run BEFORE finalizing the zip — a failing validation refuses to 
 
 Usage:
     py scripts/package_submission.py --output-dir output/ --zip-name submission.zip
+    py scripts/package_submission.py --output-dir output/ --test-dir dataset/test --check-ids
 """
 
 from __future__ import annotations
@@ -25,29 +26,72 @@ def package_submission(
     output_dir: str = "output",
     zip_name: str = "submission.zip",
     project_root: str | None = None,
+    test_dir: str = "dataset/test",
+    check_ids: bool = False,
 ) -> bool:
     """
     Validate output files and package them into a submission zip.
 
-    Returns True on success, False on failure.
+    Parameters
+    ----------
+    output_dir:
+        Directory containing matching_results.tsv and candidate_pairs.tsv.
+    zip_name:
+        Output zip filename (relative to project_root).
+    project_root:
+        Root of the project; defaults to the current working directory.
+    test_dir:
+        Directory containing test_source1/2/3.tsv, forwarded to the validator.
+    check_ids:
+        If True, the validator also checks that every matched/candidate ID
+        exists in the test Source-2/3 files (memory-intensive; off by default).
+
+    Returns
+    -------
+    bool
+        True on success, False on failure.
     """
     root = Path(project_root) if project_root else Path.cwd()
     out_path = Path(output_dir)
     zip_path = root / zip_name
 
-    # Run validation first
+    # Locate utils/validate_submission.py and import the real validate() API
+    utils_dir = str(root / "utils")
+    if utils_dir not in sys.path:
+        sys.path.insert(0, utils_dir)
+
     print("Running pre-packaging validation...")
-    sys.path.insert(0, str(root / "utils"))
     try:
-        from validate_submission import validate_submission
-        success = validate_submission(output_dir=str(out_path))
+        from validate_submission import validate  # real function from utils/
     except ImportError as exc:
-        print(f"ERROR: Could not import validate_submission: {exc}")
+        print(f"ERROR: Could not import validate() from utils/validate_submission.py: {exc}")
         return False
 
-    if not success:
-        print("❌ Packaging refused: fix validation errors first.")
+    matching_path = str(out_path / "matching_results.tsv")
+    candidate_path = str(out_path / "candidate_pairs.tsv")
+
+    try:
+        errors, warnings = validate(
+            matching_path=matching_path,
+            candidate_path=candidate_path,
+            test_dir=test_dir,
+            check_ids=check_ids,
+        )
+    except Exception as exc:
+        print(f"ERROR: Validation raised an exception: {exc}")
         return False
+
+    for warning in warnings:
+        print(f"WARNING: {warning}")
+
+    if errors:
+        print(f"\nFAIL - {len(errors)} issue(s) to fix before submitting:")
+        for i, error in enumerate(errors, 1):
+            print(f"  {i}. {error}")
+        print("\n\u274c Packaging refused: fix validation errors first.")
+        return False
+
+    print("PASS - validation succeeded.")
 
     # Build the zip
     print(f"\nPackaging submission to: {zip_path}")
@@ -82,16 +126,29 @@ def package_submission(
                 zf.write(extra_path, arcname=f"code/{extra}")
                 print(f"  Added: code/{extra}")
 
-    print(f"\n✅ Submission packaged: {zip_path} ({zip_path.stat().st_size / 1024:.1f} KB)")
+    print(f"\n\u2705 Submission packaged: {zip_path} ({zip_path.stat().st_size / 1024:.1f} KB)")
     return True
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Package the submission zip.")
-    parser.add_argument("--output-dir", default="output")
-    parser.add_argument("--zip-name", default="submission.zip")
+    parser.add_argument("--output-dir", default="output", help="Output directory (default: output)")
+    parser.add_argument("--zip-name", default="submission.zip", help="Zip filename (default: submission.zip)")
+    parser.add_argument(
+        "--test-dir", default="dataset/test",
+        help="Folder with test source files for the validator (default: dataset/test)",
+    )
+    parser.add_argument(
+        "--check-ids", action="store_true",
+        help="Enable ID-existence check in the validator (off by default; memory-intensive)",
+    )
     args = parser.parse_args()
-    success = package_submission(output_dir=args.output_dir, zip_name=args.zip_name)
+    success = package_submission(
+        output_dir=args.output_dir,
+        zip_name=args.zip_name,
+        test_dir=args.test_dir,
+        check_ids=args.check_ids,
+    )
     sys.exit(0 if success else 1)
 
 

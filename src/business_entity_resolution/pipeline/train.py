@@ -157,7 +157,11 @@ def train(cfg: Optional[Config] = None, config_path: Optional[str] = None) -> No
     np.random.seed(cfg.random_seed)
     all_s1_ids = source1_df["entity_id"].tolist()  # convert to plain list for shuffle
     np.random.shuffle(all_s1_ids)
-    n_val = max(1, int(len(all_s1_ids) * cfg.training.validation_fraction))
+    n_val = (
+        max(1, int(len(all_s1_ids) * cfg.training.validation_fraction))
+        if cfg.training.validation_fraction > 0.0
+        else 0
+    )
     val_ids = set(all_s1_ids[:n_val])
     train_ids = set(all_s1_ids[n_val:])
 
@@ -193,6 +197,23 @@ def train(cfg: Optional[Config] = None, config_path: Optional[str] = None) -> No
 
     logger.info("Total training pairs: %d (%d positive)", len(y_train), y_train.sum())
 
+    if len(y_train) == 0:
+        raise RuntimeError(
+            "Training aborted: no candidate pairs survived candidate generation. "
+            "Check that ground_truth.tsv is present, source files are non-empty, "
+            "and that blocking strategies are producing candidates."
+        )
+
+    n_pos = int(y_train.sum())
+    if n_pos == 0:
+        raise RuntimeError(
+            f"Training aborted: {len(y_train)} candidate pairs were generated but "
+            "NONE of them are positive (ground-truth matches). This usually means "
+            "the train/val split left all positive entities in the validation set — "
+            "try reducing cfg.training.validation_fraction, or ensure the training "
+            "fixture has enough matched entities."
+        )
+
     # ----------------------------------------------------------------
     # Fit model
     # ----------------------------------------------------------------
@@ -202,92 +223,92 @@ def train(cfg: Optional[Config] = None, config_path: Optional[str] = None) -> No
 
     # ----------------------------------------------------------------
     # Run candidate generation + feature extraction for VALIDATION data
-    # ----------------------------------------------------------------
-    logger.info("--- Source 2: Validation candidate generation ---")
-    cand_result_s2_val = run_candidate_generation(
-        s1_val, source2_df, cfg, source_tag="source2", ground_truth_df=gt_val
-    )
-
-    logger.info("--- Source 3: Validation candidate generation ---")
-    cand_result_s3_val = run_candidate_generation(
-        s1_val, source3_df, cfg, source_tag="source3", ground_truth_df=gt_val
-    )
-
-    # Score validation candidates
-    X_val_s2, cands_s2_val = extract_features(cand_result_s2_val, cfg)
-    X_val_s3, cands_s3_val = extract_features(cand_result_s3_val, cfg)
-
-    scored_s2_val = cands_s2_val.copy() if not cands_s2_val.empty else pd.DataFrame(
-        columns=["source1_entity_id", "other_entity_id", "strategy_name"]
-    )
-    scored_s3_val = cands_s3_val.copy() if not cands_s3_val.empty else pd.DataFrame(
-        columns=["source1_entity_id", "other_entity_id", "strategy_name"]
-    )
-
-    if len(X_val_s2) > 0 and not scored_s2_val.empty:
-        scored_s2_val = scored_s2_val.copy()
-        scored_s2_val["score"] = model.predict_proba(X_val_s2)
-    if len(X_val_s3) > 0 and not scored_s3_val.empty:
-        scored_s3_val = scored_s3_val.copy()
-        scored_s3_val["score"] = model.predict_proba(X_val_s3)
-
-    # Combine s2 + s3 scored pairs for threshold tuning
-    all_scored_val = pd.concat(
-        [df for df in [scored_s2_val, scored_s3_val] if "score" in df.columns and not df.empty],
-        ignore_index=True,
-    )
-    # threshold_tuning._make_predictions expects: source1_entity_id, other_entity_id, score
-    # — don't rename; pass the original column name directly
-    all_scored_val_for_tuning = all_scored_val  # already has other_entity_id
-
-    # ----------------------------------------------------------------
-    # Threshold tuning
+    # (skipped entirely when validation_fraction=0.0 → empty val set)
     # ----------------------------------------------------------------
     val_s1_ids = s1_val["entity_id"].tolist()
+    best_thresh = cfg.decision.default_threshold
+    thresholds: dict[str, float] = {"_default": best_thresh}
+    final_result = None
 
-    # We tune threshold on combined source2+source3 scored pairs
-    # by comparing against the combined ground truth
-    if not all_scored_val_for_tuning.empty:
-        if cfg.decision.per_country:
-            thresholds = tune_per_country_thresholds(
-                all_scored_val_for_tuning,
-                gt_val,
-                cand_result_s2_val.source1_df,
-                cfg.decision.threshold_grid,
-                cfg.decision.default_threshold,
-                cfg.decision.min_country_val_size,
-            )
-            best_thresh = thresholds.get("_default", cfg.decision.default_threshold)
-        else:
-            best_thresh, val_result = tune_threshold(
-                all_scored_val_for_tuning,
-                gt_val,
-                val_s1_ids,
-                cfg.decision.threshold_grid,
-                cfg.decision.default_threshold,
-            )
-            thresholds = {"_default": best_thresh}
+    if s1_val.empty:
+        logger.info(
+            "Skipping validation: validation_fraction=0 (no val entities). "
+            "Using default threshold %.2f.", best_thresh
+        )
     else:
-        best_thresh = cfg.decision.default_threshold
-        thresholds = {"_default": best_thresh}
-        logger.warning("No scored validation pairs - using default threshold %.2f", best_thresh)
+        logger.info("--- Source 2: Validation candidate generation ---")
+        cand_result_s2_val = run_candidate_generation(
+            s1_val, source2_df, cfg, source_tag="source2", ground_truth_df=gt_val
+        )
 
-    # ----------------------------------------------------------------
-    # Final validation evaluation at best threshold
-    # ----------------------------------------------------------------
-    combined_predictions: dict[str, set[str]] = {eid: set() for eid in val_s1_ids}
+        logger.info("--- Source 3: Validation candidate generation ---")
+        cand_result_s3_val = run_candidate_generation(
+            s1_val, source3_df, cfg, source_tag="source3", ground_truth_df=gt_val
+        )
 
-    for scored_df, source_t in [(scored_s2_val, "source2"), (scored_s3_val, "source3")]:
-        if "score" not in (scored_df.columns if not scored_df.empty else []):
-            continue
-        matches = scored_df[scored_df["score"] >= best_thresh]
-        for _, row in matches.iterrows():
-            s1id = row["source1_entity_id"]
-            if s1id in combined_predictions:
-                combined_predictions[s1id].add(row["other_entity_id"])
+        # Score validation candidates
+        X_val_s2, cands_s2_val = extract_features(cand_result_s2_val, cfg)
+        X_val_s3, cands_s3_val = extract_features(cand_result_s3_val, cfg)
 
-    gt_dict_val = build_ground_truth_dict(gt_val, val_s1_ids)
-    final_result = evaluate(combined_predictions, gt_dict_val)
+        scored_s2_val = cands_s2_val.copy() if not cands_s2_val.empty else pd.DataFrame(
+            columns=["source1_entity_id", "other_entity_id", "strategy_name"]
+        )
+        scored_s3_val = cands_s3_val.copy() if not cands_s3_val.empty else pd.DataFrame(
+            columns=["source1_entity_id", "other_entity_id", "strategy_name"]
+        )
+
+        if len(X_val_s2) > 0 and not scored_s2_val.empty:
+            scored_s2_val = scored_s2_val.copy()
+            scored_s2_val["score"] = model.predict_proba(X_val_s2)
+        if len(X_val_s3) > 0 and not scored_s3_val.empty:
+            scored_s3_val = scored_s3_val.copy()
+            scored_s3_val["score"] = model.predict_proba(X_val_s3)
+
+        # Combine s2 + s3 scored pairs for threshold tuning
+        scored_dfs_with_scores = [
+            df for df in [scored_s2_val, scored_s3_val]
+            if "score" in df.columns and not df.empty
+        ]
+        if scored_dfs_with_scores:
+            all_scored_val = pd.concat(scored_dfs_with_scores, ignore_index=True)
+        else:
+            all_scored_val = pd.DataFrame(
+                columns=["source1_entity_id", "other_entity_id", "score"]
+            )
+
+        # ----------------------------------------------------------------
+        # Threshold tuning
+        # ----------------------------------------------------------------
+        if not all_scored_val.empty:
+            if cfg.decision.per_country:
+                thresholds = tune_per_country_thresholds(
+                    all_scored_val,
+                    gt_val,
+                    cand_result_s2_val.source1_df,
+                    cfg.decision.threshold_grid,
+                    cfg.decision.default_threshold,
+                    cfg.decision.min_country_val_size,
+                )
+                best_thresh = thresholds.get("_default", cfg.decision.default_threshold)
+            else:
+                best_thresh, val_result = tune_threshold(
+                    all_scored_val,
+                    gt_val,
+                    val_s1_ids,
+                    cfg.decision.threshold_grid,
+                    cfg.decision.default_threshold,
+                )
+                thresholds = {"_default": best_thresh}
+        else:
+            logger.warning("No scored validation pairs - using default threshold %.2f", best_thresh)
+
+        # ----------------------------------------------------------------
+        # Final validation evaluation at best threshold
+        # ----------------------------------------------------------------
+        from business_entity_resolution.decision.threshold_tuning import _make_predictions as _mp
+        combined_predictions = _mp(all_scored_val, val_s1_ids, best_thresh)
+        gt_dict_val = build_ground_truth_dict(gt_val, val_s1_ids)
+        final_result = evaluate(combined_predictions, gt_dict_val)
 
     # ----------------------------------------------------------------
     # Print diagnostics block
@@ -296,21 +317,28 @@ def train(cfg: Optional[Config] = None, config_path: Optional[str] = None) -> No
     print("TRAINING COMPLETE - FULL DIAGNOSTICS BLOCK")
     print("=" * 70)
     print(f"  Total training time: {time.time() - t_start:.1f}s")
-    print(f"\n  Source-2 blocking recall ceiling: "
-          f"{cand_result_s2_train.diagnostics.blocking_recall_ceiling or 'N/A':.4f}"
-          if cand_result_s2_train.diagnostics.blocking_recall_ceiling is not None
-          else "\n  Source-2 blocking recall ceiling: N/A (no GT provided)")
-    print(f"  Source-3 blocking recall ceiling: "
-          f"{cand_result_s3_train.diagnostics.blocking_recall_ceiling or 'N/A':.4f}"
-          if cand_result_s3_train.diagnostics.blocking_recall_ceiling is not None
-          else "  Source-3 blocking recall ceiling: N/A")
+
+    s2_ceil = cand_result_s2_train.diagnostics.blocking_recall_ceiling
+    s3_ceil = cand_result_s3_train.diagnostics.blocking_recall_ceiling
+    print(
+        f"\n  Source-2 blocking recall ceiling: "
+        + (f"{s2_ceil:.4f}" if s2_ceil is not None else "N/A (no GT provided)")
+    )
+    print(
+        f"  Source-3 blocking recall ceiling: "
+        + (f"{s3_ceil:.4f}" if s3_ceil is not None else "N/A")
+    )
     print(f"\n  Chosen threshold: {best_thresh:.2f}")
-    print(f"\n  Holdout macro F0.5:    {final_result.macro_f05:.4f}")
-    print(f"  Holdout precision:     {final_result.macro_precision:.4f}")
-    print(f"  Holdout recall:        {final_result.macro_recall:.4f}")
-    print(f"  Singleton accuracy:    {final_result.singleton_accuracy:.4f}  "
-          f"({final_result.n_singletons} singletons)")
-    print(f"  Non-singleton entities: {final_result.n_non_singletons}")
+
+    if final_result is not None:
+        print(f"\n  Holdout macro F0.5:    {final_result.macro_f05:.4f}")
+        print(f"  Holdout precision:     {final_result.macro_precision:.4f}")
+        print(f"  Holdout recall:        {final_result.macro_recall:.4f}")
+        print(f"  Singleton accuracy:    {final_result.singleton_accuracy:.4f}  "
+              f"({final_result.n_singletons} singletons)")
+        print(f"  Non-singleton entities: {final_result.n_non_singletons}")
+    else:
+        print("\n  Holdout metrics: N/A (validation_fraction=0, no val set)")
     print("=" * 70 + "\n")
 
     # ----------------------------------------------------------------
@@ -325,8 +353,8 @@ def train(cfg: Optional[Config] = None, config_path: Optional[str] = None) -> No
         "thresholds": thresholds,
         "best_threshold": best_thresh,
         "per_country": cfg.decision.per_country,
-        "val_macro_f05": final_result.macro_f05,
-        "val_singleton_accuracy": final_result.singleton_accuracy,
+        "val_macro_f05": final_result.macro_f05 if final_result is not None else None,
+        "val_singleton_accuracy": final_result.singleton_accuracy if final_result is not None else None,
     }
     config_artifact_path = model_dir / cfg.paths.config_artifact_file
     with config_artifact_path.open("w") as f:

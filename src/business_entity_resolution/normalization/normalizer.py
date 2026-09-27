@@ -240,6 +240,10 @@ def normalize_address(address: str, country: str = "default") -> NormalizedAddre
     tokens = cleaned.split()
     tokens = _apply_address_abbreviations(tokens, rules.address_abbreviations)
 
+    # Remove stopwords that carry no discriminating value in addresses
+    # (documented behavior — these are prepositions/articles, not name words).
+    tokens = [t for t in tokens if t not in _ADDRESS_STOPWORDS]
+
     # Detect street number: the first token that is purely numeric (possibly
     # with a trailing letter like "123a") is taken as the street number.
     street_number: Optional[str] = None

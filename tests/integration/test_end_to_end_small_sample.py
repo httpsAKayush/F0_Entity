@@ -46,7 +46,7 @@ def trained_model_dir(tmp_path_factory):
     cfg.paths.model_dir = str(model_dir)
     cfg.paths.train_subdir = "train"
     cfg.blocking.candidate_cap = 20
-    cfg.training.validation_fraction = 0.3
+    cfg.training.validation_fraction = 0.0   # tiny fixture — use all 7 entities for training
     cfg.training.negative_positive_ratio = 3
     cfg.models.active_model = "ensemble"
     cfg.models.lightgbm.n_estimators = 50

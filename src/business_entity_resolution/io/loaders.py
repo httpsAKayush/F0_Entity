@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Union
 
 import pandas as pd
 
@@ -56,7 +56,8 @@ def validate_dataframe(df: pd.DataFrame, schema: SchemaSpec, filepath: str = "")
     Raises
     ------
     SchemaError
-        If required columns are missing or required columns contain nulls.
+        If required columns are missing, required columns contain nulls, or
+        unique columns contain duplicate values.
         The error message names the file, the column, and the problem.
     """
     label = f"[{filepath}] " if filepath else ""
@@ -78,6 +79,18 @@ def validate_dataframe(df: pd.DataFrame, schema: SchemaSpec, filepath: str = "")
                 f"unexpected null values. All rows in this column must be non-null."
             )
 
+    # 3. Uniqueness checks
+    for spec in schema.columns:
+        if spec.unique and spec.name in df.columns:
+            dup_count = df[spec.name].duplicated().sum()
+            if dup_count > 0:
+                dupes = df.loc[df[spec.name].duplicated(keep=False), spec.name].unique()[:5]
+                raise SchemaError(
+                    f"{label}Column '{spec.name}' in '{schema.file_label}' has "
+                    f"{dup_count:,} duplicate value(s) — entity_id must be unique. "
+                    f"Example duplicates: {list(dupes)}"
+                )
+
 
 # ---------------------------------------------------------------------------
 # Full-file loaders (for files that comfortably fit in RAM)
@@ -85,13 +98,14 @@ def validate_dataframe(df: pd.DataFrame, schema: SchemaSpec, filepath: str = "")
 
 
 def _read_tsv(
-    filepath: Path,
+    filepath: Union[str, Path],
     schema: SchemaSpec,
     encoding: str = "utf-8",
     delimiter: str = "\t",
     dtype: Optional[dict[str, str]] = None,
 ) -> pd.DataFrame:
     """Read a TSV file, validate schema, and return a DataFrame."""
+    filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(
             f"Expected file not found: {filepath}. "
@@ -119,22 +133,30 @@ def _read_tsv(
     return df
 
 
-def load_source1(filepath: Path, encoding: str = "utf-8", delimiter: str = "\t") -> pd.DataFrame:
+def load_source1(
+    filepath: Union[str, Path], encoding: str = "utf-8", delimiter: str = "\t"
+) -> pd.DataFrame:
     """Load and validate source1 (reference entities) TSV file."""
-    return _read_tsv(filepath, SOURCE1_SCHEMA, encoding=encoding, delimiter=delimiter)
+    return _read_tsv(Path(filepath), SOURCE1_SCHEMA, encoding=encoding, delimiter=delimiter)
 
 
-def load_source2(filepath: Path, encoding: str = "utf-8", delimiter: str = "\t") -> pd.DataFrame:
+def load_source2(
+    filepath: Union[str, Path], encoding: str = "utf-8", delimiter: str = "\t"
+) -> pd.DataFrame:
     """Load and validate source2 (vendor-A) TSV file."""
-    return _read_tsv(filepath, SOURCE2_SCHEMA, encoding=encoding, delimiter=delimiter)
+    return _read_tsv(Path(filepath), SOURCE2_SCHEMA, encoding=encoding, delimiter=delimiter)
 
 
-def load_source3(filepath: Path, encoding: str = "utf-8", delimiter: str = "\t") -> pd.DataFrame:
+def load_source3(
+    filepath: Union[str, Path], encoding: str = "utf-8", delimiter: str = "\t"
+) -> pd.DataFrame:
     """Load and validate source3 (vendor-B) TSV file."""
-    return _read_tsv(filepath, SOURCE3_SCHEMA, encoding=encoding, delimiter=delimiter)
+    return _read_tsv(Path(filepath), SOURCE3_SCHEMA, encoding=encoding, delimiter=delimiter)
 
 
-def load_ground_truth(filepath: Path, encoding: str = "utf-8", delimiter: str = "\t") -> pd.DataFrame:
+def load_ground_truth(
+    filepath: Union[str, Path], encoding: str = "utf-8", delimiter: str = "\t"
+) -> pd.DataFrame:
     """
     Load and validate ground truth TSV file.
 
@@ -143,15 +165,22 @@ def load_ground_truth(filepath: Path, encoding: str = "utf-8", delimiter: str = 
 
     source_tag is expected to be "source2" or "source3".
     """
-    return _read_tsv(filepath, GROUND_TRUTH_SCHEMA, encoding=encoding, delimiter=delimiter)
+    return _read_tsv(Path(filepath), GROUND_TRUTH_SCHEMA, encoding=encoding, delimiter=delimiter)
 
 
 def load_matching_results(
-    filepath: Path, encoding: str = "utf-8", delimiter: str = "\t"
+    filepath: Union[str, Path], encoding: str = "utf-8", delimiter: str = "\t"
 ) -> pd.DataFrame:
     """Load and validate a matching_results.tsv output file (for validation)."""
-    return _read_tsv(filepath, MATCHING_RESULTS_SCHEMA, encoding=encoding, delimiter=delimiter)
+    return _read_tsv(Path(filepath), MATCHING_RESULTS_SCHEMA, encoding=encoding, delimiter=delimiter)
 
+
+def load_candidate_pairs(
+    filepath: Union[str, Path], encoding: str = "utf-8", delimiter: str = "\t"
+) -> pd.DataFrame:
+    """Load and validate a candidate_pairs.tsv output file."""
+    from business_entity_resolution.io.schemas import CANDIDATE_PAIRS_SCHEMA
+    return _read_tsv(Path(filepath), CANDIDATE_PAIRS_SCHEMA, encoding=encoding, delimiter=delimiter)
 
 # ---------------------------------------------------------------------------
 # Chunked / streaming loaders (for large source files that may not fit in RAM)
@@ -159,7 +188,7 @@ def load_matching_results(
 
 
 def iter_source_chunks(
-    filepath: Path,
+    filepath: Union[str, Path],
     schema: SchemaSpec,
     chunk_size: int = 100_000,
     encoding: str = "utf-8",
@@ -171,6 +200,11 @@ def iter_source_chunks(
     Each chunk is schema-validated before being yielded.  This allows the
     caller to process data in a streaming fashion without loading the entire
     file into RAM.
+
+    For columns marked ``unique=True`` in the schema, cross-chunk uniqueness
+    is enforced by tracking every seen value in memory.  This raises a
+    SchemaError on the first duplicate found across chunks, rather than
+    silently allowing it to propagate into the pipeline.
 
     Parameters
     ----------
@@ -190,6 +224,7 @@ def iter_source_chunks(
     pd.DataFrame
         A chunk of rows, validated and stripped.
     """
+    filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"Expected file not found: {filepath}")
 
@@ -204,6 +239,10 @@ def iter_source_chunks(
         chunksize=chunk_size,
     )
 
+    # Track values for cross-chunk uniqueness checks
+    unique_cols = [spec.name for spec in schema.columns if spec.unique]
+    seen_values: dict[str, set] = {col: set() for col in unique_cols}
+
     chunk_idx = 0
     for chunk in chunk_reader:
         # Strip whitespace
@@ -212,7 +251,7 @@ def iter_source_chunks(
                 chunk[col] = chunk[col].str.strip()
 
         if chunk_idx == 0:
-            # Full schema validation on first chunk (column presence check)
+            # Full schema validation on first chunk (column presence + nulls + within-chunk dupes)
             validate_dataframe(chunk, schema, str(filepath))
         else:
             # Subsequent chunks: only null checks (columns already confirmed)
@@ -223,12 +262,27 @@ def iter_source_chunks(
                         f"[{filepath}] Column '{col}' in chunk {chunk_idx} has "
                         f"{null_count:,} unexpected null values."
                     )
+
+        # Cross-chunk uniqueness tracking
+        for col in unique_cols:
+            if col not in chunk.columns:
+                continue
+            col_vals = chunk[col]
+            cross_dupes = col_vals[col_vals.isin(seen_values[col])]
+            if not cross_dupes.empty:
+                raise SchemaError(
+                    f"[{filepath}] Column '{col}' contains duplicate values across chunks "
+                    f"(entity_id must be globally unique). "
+                    f"Examples: {list(cross_dupes.unique()[:5])}"
+                )
+            seen_values[col].update(col_vals.tolist())
+
         chunk_idx += 1
         yield chunk
 
 
 def load_source_full_or_chunked(
-    filepath: Path,
+    filepath: Union[str, Path],
     schema: SchemaSpec,
     chunk_size: Optional[int] = None,
     encoding: str = "utf-8",
@@ -241,6 +295,7 @@ def load_source_full_or_chunked(
     This convenience wrapper lets callers not care about file size — they
     always receive a single DataFrame.
     """
+    filepath = Path(filepath)
     if chunk_size is None:
         return _read_tsv(filepath, schema, encoding=encoding, delimiter=delimiter)
 

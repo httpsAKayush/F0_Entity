@@ -199,14 +199,21 @@ def build_ground_truth_dict(
     -------
     dict[str, set[str]]
     """
+    # Initialise every S1 entity as a singleton (empty set)
     gt: dict[str, set[str]] = {eid: set() for eid in source1_ids}
-    for _, row in ground_truth_df.iterrows():
-        s1id = row["source1_entity_id"]
-        sid = row["source_id"]
-        if s1id in gt:
-            gt[s1id].add(sid)
-        else:
-            gt[s1id] = {sid}
+
+    if ground_truth_df.empty:
+        return gt
+
+    # Vectorized groupby: group source_id values per source1_entity_id
+    grouped = (
+        ground_truth_df[["source1_entity_id", "source_id"]]
+        .dropna(subset=["source1_entity_id", "source_id"])
+        .groupby("source1_entity_id")["source_id"]
+        .apply(set)
+    )
+    for s1id, id_set in grouped.items():
+        gt[s1id] = id_set  # overwrites the empty-set default; also covers unseen S1 IDs
     return gt
 
 
@@ -228,15 +235,21 @@ def build_predictions_dict(
     dict[str, set[str]]
         source1_entity_id -> set of predicted matched entity IDs.
     """
-    predictions: dict[str, set[str]] = {}
-    for _, row in matching_results_df.iterrows():
-        s1id = row["source1_entity_id"]
-        matched_str = str(row.get("matched_entity_ids", "")).strip()
-        if matched_str:
-            predictions[s1id] = {x.strip() for x in matched_str.split(",") if x.strip()}
-        else:
-            predictions[s1id] = set()
-    return predictions
+    if matching_results_df.empty:
+        return {}
+
+    def _parse(cell) -> set[str]:
+        s = str(cell).strip() if (cell is not None and str(cell) != "nan") else ""
+        return {x.strip() for x in s.split(",") if x.strip()} if s else set()
+
+    # Fully vectorized: apply _parse to the matched_entity_ids column only,
+    # then zip with source1_entity_id — no row-level dict access needed.
+    ids = matching_results_df["source1_entity_id"].tolist()
+    col = "matched_entity_ids"
+    if col not in matching_results_df.columns:
+        return {eid: set() for eid in ids}
+    parsed = matching_results_df[col].apply(_parse)
+    return dict(zip(ids, parsed))
 
 
 
