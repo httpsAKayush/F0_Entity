@@ -21,11 +21,10 @@ build/
 .venv/
 venv/
 
+
 dataset/test/*.tsv
 dataset/train/*.tsv
-.env
+
 .vscode
 .kilo
-
-
-
+.env
