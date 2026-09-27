@@ -24,6 +24,8 @@ venv/
 dataset/test/*.tsv
 dataset/train/*.tsv
 .env
+.vscode
+.kilo
 
 
 
