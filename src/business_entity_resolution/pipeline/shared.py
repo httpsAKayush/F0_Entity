@@ -265,117 +265,18 @@ def run_candidate_generation(
     s1_norm = normalize_source_df_vectorized(source1_df)
     ot_norm = normalize_source_df_vectorized(other_df)
 
-    # Step 2: Build strategies
-    strategies = build_blocking_strategies(cfg)
-    engine = BlockingEngine(
-        strategies=strategies,
-        candidate_cap=cfg.blocking.candidate_cap,
-        max_block_size=cfg.blocking.max_block_size,
-        min_key_length=cfg.blocking.min_key_length,
+    from business_entity_resolution.blocking.duckdb_engine import generate_candidates_duckdb
+
+    all_candidates, combined_diagnostics = generate_candidates_duckdb(
+        s1_norm, 
+        ot_norm, 
+        candidate_cap=cfg.blocking.candidate_cap
     )
 
-    # Step 3: Country partitioning
-    s1_countries = set(s1_norm["country_norm"].unique())
-    ot_countries = set(ot_norm["country_norm"].unique())
-    all_countries = s1_countries  # we partition by Source-1 country
-
-    # Log unknown countries (countries in other_df not seen in source1_df)
-    unseen_in_s1 = ot_countries - s1_countries
-    if unseen_in_s1:
-        logger.warning(
-            "Other source contains countries not in Source-1: %s. "
-            "These records will be unreachable via country-partitioned blocking.",
-            unseen_in_s1,
-        )
-
-    all_candidates_list: list[pd.DataFrame] = []
-    combined_diagnostics = BlockingDiagnostics()
-    combined_diagnostics.per_strategy = []
-
-    for country in sorted(all_countries):
-        s1_partition = s1_norm[s1_norm["country_norm"] == country]
-        ot_partition = ot_norm[ot_norm["country_norm"] == country]
-
-        if s1_partition.empty or ot_partition.empty:
-            if not s1_partition.empty and ot_partition.empty:
-                logger.warning(
-                    "Country '%s' has %d Source-1 records but 0 %s records. "
-                    "These Source-1 entities will be predicted as singletons.",
-                    country, len(s1_partition), source_tag,
-                )
-            continue
-
-        logger.info(
-            "Blocking country '%s': %d source1, %d %s records",
-            country, len(s1_partition), len(ot_partition), source_tag,
-        )
-
-        # Filter ground truth to this country's source1 entities
-        country_gt = None
-        if ground_truth_df is not None:
-            country_s1_ids = set(s1_partition["entity_id"])
-            country_gt = ground_truth_df[
-                ground_truth_df["source1_entity_id"].isin(country_s1_ids)
-            ]
-
-        cands, diag = engine.run(
-            s1_partition,
-            ot_partition,
-            ground_truth_df=country_gt,
-            source_tag=source_tag,
-        )
-
-        # Accumulate diagnostics
-        combined_diagnostics.total_candidates_before_cap += diag.total_candidates_before_cap
-        combined_diagnostics.total_candidates_after_cap += diag.total_candidates_after_cap
-        combined_diagnostics.oversized_blocks_skipped += diag.oversized_blocks_skipped
-        combined_diagnostics.elapsed_seconds += diag.elapsed_seconds
-
-        # Merge per-strategy diagnostics
-        for strat_diag in diag.per_strategy:
-            existing = next(
-                (s for s in combined_diagnostics.per_strategy
-                 if s.strategy_name == strat_diag.strategy_name),
-                None,
-            )
-            if existing is None:
-                from business_entity_resolution.blocking.engine import StrategyDiagnostic
-                combined_diagnostics.per_strategy.append(
-                    StrategyDiagnostic(
-                        strategy_name=strat_diag.strategy_name,
-                        raw_candidates=strat_diag.raw_candidates,
-                        unique_pairs=strat_diag.unique_pairs,
-                        recall=None,
-                    )
-                )
-            else:
-                existing.raw_candidates += strat_diag.raw_candidates
-                existing.unique_pairs += strat_diag.unique_pairs
-
-        if not cands.empty:
-            all_candidates_list.append(cands)
-
-    # Union across countries
-    if all_candidates_list:
-        all_candidates = pd.concat(all_candidates_list, ignore_index=True)
-        all_candidates = all_candidates.drop_duplicates(
-            subset=["source1_entity_id", "other_entity_id"]
-        )
-    else:
-        all_candidates = pd.DataFrame(
-            columns=["source1_entity_id", "other_entity_id", "strategy_name"]
-        )
-
-    # Compute combined recall ceiling
-    if ground_truth_df is not None and not all_candidates.empty:
-        from business_entity_resolution.evaluation.metrics import blocking_recall_ceiling
-        combined_diagnostics.blocking_recall_ceiling = blocking_recall_ceiling(
-            all_candidates, ground_truth_df, source_tag=source_tag
-        )
-
+    all_countries = set(s1_norm["country_norm"].unique())
     logger.info(
-        "%s candidate generation: %d total candidates across %d countries",
-        source_tag, len(all_candidates), len(all_countries),
+        "%s candidate generation: %d total candidates via DuckDB out-of-core engine",
+        source_tag, len(all_candidates)
     )
 
     return CandidateResult(
@@ -492,7 +393,15 @@ def prepare_training_data(
     n_neg_target = n_pos * cfg.training.negative_positive_ratio
 
     if len(negatives) > n_neg_target:
-        negatives = negatives.sample(n=n_neg_target, random_state=cfg.random_seed)
+        negatives = negatives.sample(n=int(n_neg_target), random_state=cfg.random_seed)
+
+    # Hardware-Aware Training Strategy: Subsample 10% of the candidate pairs for training
+    # to fit within 8GB RAM and 4GB VRAM limits, maintaining the positive/negative ratio.
+    subsample_fraction = 0.10
+    if len(positives) > 20:
+        positives = positives.sample(frac=subsample_fraction, random_state=cfg.random_seed)
+    if len(negatives) > 20:
+        negatives = negatives.sample(frac=subsample_fraction, random_state=cfg.random_seed)
 
     training_candidates = pd.concat([positives, negatives], ignore_index=True)
     training_candidates = training_candidates.sample(

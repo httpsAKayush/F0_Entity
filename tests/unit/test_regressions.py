@@ -376,3 +376,41 @@ def test_make_predictions_empty_input():
         threshold=0.5,
     )
     assert result == {"S1-001": set(), "S1-002": set()}
+
+
+# ---------------------------------------------------------------------------
+# Bug: cli.py path resolution failure on validate
+# ---------------------------------------------------------------------------
+
+
+def test_cli_validate_end_to_end_functional_test(tmp_path):
+    import subprocess
+    import sys
+    import os
+
+    # Create mock dataset/test directories and files
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+    test_dir = tmp_path / "dataset" / "test"
+    test_dir.mkdir(parents=True)
+
+    # Write mock files
+    (test_dir / "test_source1.tsv").write_text("entity_id\tbusiness_name\tbusiness_address\tcountry\nS1-001\tA\tB\tUS\n", encoding="utf-8")
+    (test_dir / "test_source2.tsv").write_text("entity_id\tbusiness_name\tbusiness_address\tcountry\nS2-001\tC\tD\tUS\n", encoding="utf-8")
+    (test_dir / "test_source3.tsv").write_text("entity_id\tbusiness_name\tbusiness_address\tcountry\nS3-001\tE\tF\tUS\n", encoding="utf-8")
+
+    (out_dir / "matching_results.tsv").write_text("source1_entity_id\tmatched_entity_ids\nS1-001\tS2-001\n", encoding="utf-8")
+    (out_dir / "candidate_pairs.tsv").write_text("source1_entity_id\tcandidate_entity_ids\nS1-001\tS2-001\n", encoding="utf-8")
+
+    cmd = [
+        sys.executable, "-m", "business_entity_resolution", "validate",
+        "--output-dir", str(out_dir),
+        "--test-dir", str(test_dir)
+    ]
+    # Set PYTHONPATH so the module can be found
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).parent.parent.parent / "src")
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    assert result.returncode == 0, f"ber validate failed: {result.stdout} {result.stderr}"
+    assert "PASS" in result.stdout

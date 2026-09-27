@@ -68,12 +68,8 @@ def validate(output_dir: str, test_dir: str, check_ids: bool) -> None:
     import os
     from pathlib import Path
 
-    utils_dir = str(Path(__file__).parent.parent.parent.parent / "utils")
-    if utils_dir not in sys.path:
-        sys.path.insert(0, utils_dir)
-
     try:
-        from validate_submission import validate as _validate_fn  # real function from utils/
+        from utils.validate_submission import validate as _validate_fn
     except ImportError as exc:
         click.echo(
             f"ERROR: Could not import validate() from utils/validate_submission.py: {exc}",

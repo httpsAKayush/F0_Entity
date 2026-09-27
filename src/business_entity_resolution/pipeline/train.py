@@ -214,6 +214,13 @@ def train(cfg: Optional[Config] = None, config_path: Optional[str] = None) -> No
             "fixture has enough matched entities."
         )
 
+    if n_pos == len(y_train):
+        logger.warning("Only positive labels found in training data. Injecting dummy negative row.")
+        dummy_x = np.zeros((1, X_train.shape[1]), dtype=X_train.dtype)
+        dummy_y = np.array([0], dtype=y_train.dtype)
+        X_train = np.vstack([X_train, dummy_x])
+        y_train = np.concatenate([y_train, dummy_y])
+
     # ----------------------------------------------------------------
     # Fit model
     # ----------------------------------------------------------------

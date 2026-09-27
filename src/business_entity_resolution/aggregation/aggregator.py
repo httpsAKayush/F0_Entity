@@ -87,22 +87,15 @@ class Aggregator:
         self, scored_pairs: pd.DataFrame
     ) -> dict[str, list[str]]:
         """
-        Apply per-entity thresholds, returning source1_id -> list of matched IDs.
-
-        When ``per_country_thresholds`` is active, thresholds differ per entity so
-        we vectorize as much as possible: compute the threshold per-row via a
-        vectorized map, then apply a single boolean mask.
+        Apply per-entity thresholds, margin defense, and return source1_id -> list of matched IDs.
         """
         matched: dict[str, list[str]] = {}
         if scored_pairs.empty:
             return matched
 
         if not self._per_country:
-            # Fast path: single global threshold — pure vectorized
             above = scored_pairs[scored_pairs["score"] >= self._threshold]
         else:
-            # Per-entity threshold: map entity_id -> country -> threshold
-            # .map() is O(n) and pandas-native
             country_series = scored_pairs["source1_entity_id"].map(
                 lambda eid: self._country_map.get(eid, "")
             )
@@ -113,6 +106,25 @@ class Aggregator:
 
         if above.empty:
             return matched
+
+        # Margin-Based Singleton Defense
+        # If the highest-scoring candidate clears the threshold but the margin between it
+        # and the runner-up is dangerously narrow (e.g., < 0.15), reject all candidates.
+        above = above.sort_values(["source1_entity_id", "score"], ascending=[True, False])
+        top2 = above.groupby("source1_entity_id").head(2)
+        def calc_margin(x):
+            return x.iloc[0] - x.iloc[1] if len(x) > 1 else 1.0
+            
+        margins = top2.groupby("source1_entity_id")["score"].agg(calc_margin)
+        valid_s1 = margins[margins >= 0.15].index
+        above = above[above["source1_entity_id"].isin(valid_s1)].copy()
+
+        if above.empty:
+            return matched
+
+        # Global deduplication: greedy confidence sorting. A single S2/S3 entity cannot belong to multiple S1 entities.
+        above = above.sort_values(by="score", ascending=False)
+        above = above.drop_duplicates(subset=["other_entity_id"], keep="first")
 
         grouped = (
             above[["source1_entity_id", "other_entity_id"]]

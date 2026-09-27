@@ -83,8 +83,8 @@ class TestAggregator:
         """Multiple matches produce a comma-separated string."""
         agg = Aggregator(threshold=0.5)
         scored_s2 = _make_scored([
-            ("S1-001", "S2-001", 0.9),
-            ("S1-001", "S2-002", 0.8),
+            ("S1-001", "S2-001", 0.95),
+            ("S1-001", "S2-002", 0.75),
         ])
         scored_s3 = _make_scored([("S1-001", "S3-001", 0.85)])
         matching, _ = agg.aggregate(

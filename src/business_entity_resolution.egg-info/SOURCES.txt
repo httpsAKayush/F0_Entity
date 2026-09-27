@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 src/business_entity_resolution/__init__.py
 src/business_entity_resolution/__main__.py

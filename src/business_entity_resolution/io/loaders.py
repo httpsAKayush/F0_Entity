@@ -154,18 +154,28 @@ def load_source3(
     return _read_tsv(Path(filepath), SOURCE3_SCHEMA, encoding=encoding, delimiter=delimiter)
 
 
-def load_ground_truth(
-    filepath: Union[str, Path], encoding: str = "utf-8", delimiter: str = "\t"
-) -> pd.DataFrame:
-    """
-    Load and validate ground truth TSV file.
-
-    Returns a DataFrame with columns:
-        source1_entity_id, source_id, source_tag
-
-    source_tag is expected to be "source2" or "source3".
-    """
-    return _read_tsv(Path(filepath), GROUND_TRUTH_SCHEMA, encoding=encoding, delimiter=delimiter)
+def load_ground_truth(filepath: str | Path, encoding: str = "utf-8", delimiter: str = "\t") -> pd.DataFrame:
+    """Reads the OFFICIAL 2-column format, returns internal long format."""
+    raw = pd.read_csv(filepath, sep=delimiter, dtype=str, encoding=encoding, keep_default_na=False)
+    
+    if list(raw.columns) != ["source1_entity_id", "matched_entity_ids"]:
+        raise ValueError(f"Invalid official schema. Got {list(raw.columns)}")
+        
+    rows: list[tuple[str, str, str]] = []
+    
+    for s1id, matched in zip(raw["source1_entity_id"], raw["matched_entity_ids"]):
+        matched = matched.strip()
+        if not matched:
+            continue  # Singleton — absence from the long table IS the label
+            
+        for mid in matched.split(","):
+            mid = mid.strip()
+            if not mid:
+                continue
+            tag = "source2" if mid.startswith("S2-") else "source3"
+            rows.append((s1id, mid, tag))
+            
+    return pd.DataFrame(rows, columns=["source1_entity_id", "source_id", "source_tag"])
 
 
 def load_matching_results(

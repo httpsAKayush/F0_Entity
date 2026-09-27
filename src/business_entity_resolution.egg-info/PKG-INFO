@@ -25,3 +25,5 @@ Requires-Dist: pytest-cov>=5.0.0; extra == "dev"
 Requires-Dist: mypy>=1.11.0; extra == "dev"
 Requires-Dist: ruff>=0.7.0; extra == "dev"
 Requires-Dist: types-PyYAML>=6.0.12; extra == "dev"
+
+# F0_Entity

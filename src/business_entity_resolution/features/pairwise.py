@@ -43,7 +43,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz as rfuzz
-# rapidfuzz.process is not used directly here (cdist is called via rfuzz, not rprocess)
+from rapidfuzz import process as rf_process
 
 logger = logging.getLogger(__name__)
 
@@ -76,15 +76,16 @@ FEATURE_NAMES: list[str] = [
 
 
 # ---------------------------------------------------------------------------
-# Individual pure similarity functions
+# Individual pure similarity functions (Vectorized)
 # ---------------------------------------------------------------------------
 
-
+@np.vectorize(otypes=[np.float32])
 def exact_match(a: str, b: str) -> float:
     """Return 1.0 if *a* and *b* are identical (after stripping), else 0.0."""
     return 1.0 if a.strip() == b.strip() else 0.0
 
 
+@np.vectorize(otypes=[np.float32])
 def token_jaccard(a: str, b: str) -> float:
     """
     Jaccard similarity of word-token sets of *a* and *b*.
@@ -102,6 +103,7 @@ def token_jaccard(a: str, b: str) -> float:
     return len(set_a & set_b) / len(set_a | set_b)
 
 
+@np.vectorize(otypes=[np.float32])
 def common_prefix_ratio(a: str, b: str) -> float:
     """
     Length of the longest common prefix of *a* and *b*, divided by max length.
@@ -121,6 +123,7 @@ def common_prefix_ratio(a: str, b: str) -> float:
     return prefix_len / max_len
 
 
+@np.vectorize(otypes=[np.float32])
 def len_ratio(a: str, b: str) -> float:
     """
     min(len(a), len(b)) / max(len(a), len(b)).
@@ -134,6 +137,7 @@ def len_ratio(a: str, b: str) -> float:
     return min(la, lb) / max(la, lb)
 
 
+@np.vectorize(otypes=[np.float32])
 def street_number_agreement(num_a: str, num_b: str) -> float:
     """
     Score street number agreement:
@@ -220,51 +224,31 @@ class FeatureExtractor:
 
         # ---- Name features ----
         # Exact match
-        features[:, 0] = [exact_match(a, b) for a, b in zip(s1_names, ot_names)]
+        features[:, 0] = exact_match(s1_names, ot_names)
         # Token Jaccard
-        features[:, 1] = [token_jaccard(a, b) for a, b in zip(s1_names, ot_names)]
+        features[:, 1] = token_jaccard(s1_names, ot_names)
         # Token sort ratio (rapidfuzz)
-        features[:, 2] = np.array([
-            rfuzz.token_sort_ratio(a, b) / 100.0 for a, b in zip(s1_names, ot_names)
-        ], dtype=np.float32)
+        features[:, 2] = rf_process.cpdist(s1_names, ot_names, scorer=rfuzz.token_sort_ratio, workers=-1, dtype=np.float32) / 100.0
         # Token set ratio
-        features[:, 3] = np.array([
-            rfuzz.token_set_ratio(a, b) / 100.0 for a, b in zip(s1_names, ot_names)
-        ], dtype=np.float32)
+        features[:, 3] = rf_process.cpdist(s1_names, ot_names, scorer=rfuzz.token_set_ratio, workers=-1, dtype=np.float32) / 100.0
         # Partial ratio
-        features[:, 4] = np.array([
-            rfuzz.partial_ratio(a, b) / 100.0 for a, b in zip(s1_names, ot_names)
-        ], dtype=np.float32)
+        features[:, 4] = rf_process.cpdist(s1_names, ot_names, scorer=rfuzz.partial_ratio, workers=-1, dtype=np.float32) / 100.0
         # Edit similarity (normalized indel distance)
-        features[:, 5] = np.array([
-            rfuzz.ratio(a, b) / 100.0 for a, b in zip(s1_names, ot_names)
-        ], dtype=np.float32)
+        features[:, 5] = rf_process.cpdist(s1_names, ot_names, scorer=rfuzz.ratio, workers=-1, dtype=np.float32) / 100.0
         # Common prefix ratio
-        features[:, 6] = np.array([
-            common_prefix_ratio(a, b) for a, b in zip(s1_names, ot_names)
-        ], dtype=np.float32)
+        features[:, 6] = common_prefix_ratio(s1_names, ot_names)
         # Length ratio
-        features[:, 7] = np.array([
-            len_ratio(a, b) for a, b in zip(s1_names, ot_names)
-        ], dtype=np.float32)
+        features[:, 7] = len_ratio(s1_names, ot_names)
 
         # ---- Address features ----
-        features[:, 8] = [exact_match(a, b) for a, b in zip(s1_addrs, ot_addrs)]
-        features[:, 9] = [token_jaccard(a, b) for a, b in zip(s1_addrs, ot_addrs)]
-        features[:, 10] = np.array([
-            rfuzz.ratio(a, b) / 100.0 for a, b in zip(s1_addrs, ot_addrs)
-        ], dtype=np.float32)
-        features[:, 11] = np.array([
-            rfuzz.partial_ratio(a, b) / 100.0 for a, b in zip(s1_addrs, ot_addrs)
-        ], dtype=np.float32)
+        features[:, 8] = exact_match(s1_addrs, ot_addrs)
+        features[:, 9] = token_jaccard(s1_addrs, ot_addrs)
+        features[:, 10] = rf_process.cpdist(s1_addrs, ot_addrs, scorer=rfuzz.ratio, workers=-1, dtype=np.float32) / 100.0
+        features[:, 11] = rf_process.cpdist(s1_addrs, ot_addrs, scorer=rfuzz.partial_ratio, workers=-1, dtype=np.float32) / 100.0
         # Street number agreement
-        features[:, 12] = np.array([
-            street_number_agreement(a, b) for a, b in zip(s1_nums, ot_nums)
-        ], dtype=np.float32)
+        features[:, 12] = street_number_agreement(s1_nums, ot_nums)
         # Address length ratio
-        features[:, 13] = np.array([
-            len_ratio(a, b) for a, b in zip(s1_addrs, ot_addrs)
-        ], dtype=np.float32)
+        features[:, 13] = len_ratio(s1_addrs, ot_addrs)
 
         # ---- Landmark flags (already float32 numpy arrays from reindex) ----
         features[:, 14] = s1_landmarks
@@ -276,14 +260,12 @@ class FeatureExtractor:
         features[:, 16] = (s1_c_arr == ot_c_arr).astype(np.float32)
 
         # ---- Missing-field indicators ----
-        features[:, 17] = np.array([
-            1.0 if not a.strip() or not b.strip() else 0.0
-            for a, b in zip(s1_names, ot_names)
-        ], dtype=np.float32)
-        features[:, 18] = np.array([
-            1.0 if not a.strip() or not b.strip() else 0.0
-            for a, b in zip(s1_addrs, ot_addrs)
-        ], dtype=np.float32)
+        @np.vectorize(otypes=[np.float32])
+        def is_missing(a: str, b: str) -> float:
+            return 1.0 if not a.strip() or not b.strip() else 0.0
+
+        features[:, 17] = is_missing(s1_names, ot_names)
+        features[:, 18] = is_missing(s1_addrs, ot_addrs)
 
         # ---- Combined name+address similarity ----
         features[:, 19] = (features[:, 5] + features[:, 10]) / 2.0

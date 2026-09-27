@@ -110,6 +110,8 @@ def package_submission(
         if doc_path.exists():
             zf.write(doc_path, arcname="Documentation_template.md")
             print("  Added: Documentation_template.md")
+        else:
+            raise FileNotFoundError(f"CRITICAL: {doc_path.name} is missing. Submission must include documentation.")
 
         # Source code
         src_dir = root / "src"

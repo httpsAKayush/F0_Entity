@@ -120,20 +120,39 @@ def predict(cfg: Optional[Config] = None, config_path: Optional[str] = None) -> 
         source1_df, source3_df, cfg, source_tag="source3"
     )
 
-    # Feature extraction + scoring
-    X_s2, cands_s2 = extract_features(cand_result_s2, cfg)
-    X_s3, cands_s3 = extract_features(cand_result_s3, cfg)
+    # Chunked inference to stay under RAM limits
+    chunk_size = 250000
+    
+    def _score_in_chunks(cand_result, model, cfg):
+        cands = cand_result.candidates
+        if cands.empty:
+            return pd.DataFrame(columns=["source1_entity_id", "other_entity_id", "score"])
+            
+        from business_entity_resolution.pipeline.shared import CandidateResult
+        
+        scored_chunks = []
+        for start in range(0, len(cands), chunk_size):
+            chunk_cands = cands.iloc[start:start+chunk_size]
+            chunk_res = CandidateResult(
+                candidates=chunk_cands,
+                source1_df=cand_result.source1_df,
+                other_df=cand_result.other_df,
+                diagnostics=cand_result.diagnostics,
+                source_tag=cand_result.source_tag,
+                countries=cand_result.countries,
+            )
+            X_chunk, cands_chunk = extract_features(chunk_res, cfg)
+            if len(X_chunk) > 0:
+                scored = cands_chunk[["source1_entity_id", "other_entity_id"]].copy()
+                scored["score"] = model.predict_proba(X_chunk)
+                scored_chunks.append(scored)
+                
+        if scored_chunks:
+            return pd.concat(scored_chunks, ignore_index=True)
+        return pd.DataFrame(columns=["source1_entity_id", "other_entity_id", "score"])
 
-    scored_s2 = pd.DataFrame(columns=["source1_entity_id", "other_entity_id", "score"])
-    scored_s3 = pd.DataFrame(columns=["source1_entity_id", "other_entity_id", "score"])
-
-    if len(X_s2) > 0 and not cands_s2.empty:
-        scored_s2 = cands_s2[["source1_entity_id", "other_entity_id"]].copy()
-        scored_s2["score"] = model.predict_proba(X_s2)
-
-    if len(X_s3) > 0 and not cands_s3.empty:
-        scored_s3 = cands_s3[["source1_entity_id", "other_entity_id"]].copy()
-        scored_s3["score"] = model.predict_proba(X_s3)
+    scored_s2 = _score_in_chunks(cand_result_s2, model, cfg)
+    scored_s3 = _score_in_chunks(cand_result_s3, model, cfg)
 
     # Build country map for per-entity threshold lookup
     source1_country_map: dict[str, str] = {}

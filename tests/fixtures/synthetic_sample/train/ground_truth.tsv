@@ -1,18 +1,7 @@
-source1_entity_id	source_id	source_tag
-S1-001	S2-001	source2
-S1-001	S2-007	source2
-S1-001	S3-001	source3
-S1-001	S3-007	source3
-S1-002	S2-002	source2
-S1-002	S2-008	source2
-S1-002	S3-002	source3
-S1-003	S2-003	source2
-S1-003	S3-003	source3
-S1-004	S2-004	source2
-S1-004	S3-004	source3
-S1-005	S2-005	source2
-S1-005	S3-005	source3
-S1-007	S2-001	source2
-S1-007	S2-007	source2
-S1-007	S3-001	source3
-S1-007	S3-007	source3
+source1_entity_id	matched_entity_ids
+S1-001	S2-001,S2-007,S3-001,S3-007
+S1-002	S2-002,S2-008,S3-002
+S1-003	S2-003,S3-003
+S1-004	S2-004,S3-004
+S1-005	S2-005,S3-005
+S1-007	S2-001,S2-007,S3-001,S3-007
